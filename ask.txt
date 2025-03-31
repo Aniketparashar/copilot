@@ -1,0 +1,283 @@
+from transforms.api import transform_df, Input, Output
+from pyspark.sql.functions import col, sum, round, concat, lit, months_between, udf
+from pyspark.sql.types import IntegerType
+from pyspark.sql.window import Window
+import datetime
+
+@transform_df(
+    claim_currrent=Output("/AIG/Reinsurance Workspace/Reinsurance Tool/[INTL] CYBER/Output/Current_Claim_INTL"),
+    claim_prior=Output("/AIG/Reinsurance Workspace/Reinsurance Tool/[INTL] CYBER/Output/Prior_Claim_INTL"),
+    source_df=Input("/AIG/Reinsurance Workspace/Reinsurance Tool/[INTL] CYBER/Manual Uploads/Processed Data/Cyber - International Loss Data as of 2024Q2_20240919_v3_intl_cyber_lg_clm_detail"),
+)
+def compute(ctx, source_df, claim_Current ,claim_prior):
+    spark = ctx.spark_session
+    current_date = datetime.datetime.utcnow()
+    current_year = current_date.year
+    month = current_date.month
+
+    if month in [1, 2, 3]:
+        base_month = 12
+        previous_quarter_date = f"{current_year - 1}-12-31"
+        current_quarter = f"{current_year - 1}Q4"
+    elif month in [4, 5, 6]:
+        base_month = 3
+        previous_quarter_date = f"{current_year}-03-31"
+        current_quarter = f"{current_year}Q1"
+    elif month in [7, 8, 9]:
+        base_month = 6
+        previous_quarter_date = f"{current_year}-06-30"
+        current_quarter = f"{current_year}Q2"
+    else:
+        base_month = 9
+        previous_quarter_date = f"{current_year}-09-30"
+        current_quarter = f"{current_year}Q3"
+
+    original_columns = [
+        "KeyPolClaimFeature_1",
+        "OGIS_MAJOR_LINE_CD",
+        "OGIS_MINOR_LINE_CD",
+        "OGIS_CLASS_PERIL_CD",
+        "CLAIM_NO",
+        "FEATURE_ID",
+        "ONECLAIM_CLAIM_NO",
+        "ONECLAIM_FEATURE_ID",
+        "POLICY_NO",
+        "POLICY_INCEPTION_DT",
+        "POLICY_YR",
+        "POLICY_QTR",
+        "LOSS_YR",
+        "LOSS_QTR",
+        "LOSS_REP_DT",
+        "LOSS_DT",
+        "ACCOUNT_LINE_DESC",
+        "TRANS_YR",
+        "TRANS_QTR",
+        "RISK_TYPE",
+        "SRC_SYS_NAME",
+        "PROD_REGION_1",
+        "ISSUING_COUNTRY",
+        "PRODUCT_LINE",
+        "SUB_PRODUCT_LINE",
+        "SEGMENT",
+        "CLM_INFO_01",
+        "GRS_PAY_USD",
+        "GRS_RES_USD",
+        "GRS_INC_USD",
+        "MASTER_POLICY_NO",
+        "INSURED_NAME",
+        "PARTY_SIC_CD",
+        "PARTY_SIC_DESC",
+        "POLICY_EXPIRY_DT",
+        "CLOSE_YR",
+        "CLOSE_QTR",
+        "AY_AGE",
+        "PY_AGE",
+        "Claimfeature",
+        "Region"
+    ]
+
+    dimensional_columns = [
+        "KeyPolClaimFeature_1",
+        "OGIS_MAJOR_LINE_CD",
+        "OGIS_MINOR_LINE_CD",
+        "OGIS_CLASS_PERIL_CD",
+        "CLAIM_NO",
+        "FEATURE_ID",
+        "ONECLAIM_CLAIM_NO",
+        "ONECLAIM_FEATURE_ID",
+        "POLICY_NO",
+        "POLICY_INCEPTION_DT",
+        "POLICY_YR",
+        "POLICY_QTR",
+        "LOSS_YR",
+        "LOSS_QTR",
+        "LOSS_REP_DT",
+        "LOSS_DT",
+        "ACCOUNT_LINE_DESC",
+        "TRANS_YR",
+        "TRANS_QTR",
+        "RISK_TYPE",
+        "SRC_SYS_NAME",
+        "PROD_REGION_1",
+        "ISSUING_COUNTRY",
+        "PRODUCT_LINE",
+        "SUB_PRODUCT_LINE",
+        "SEGMENT",
+        "CLM_INFO_01",
+        "MASTER_POLICY_NO",
+        "INSURED_NAME",
+        "PARTY_SIC_CD",
+        "PARTY_SIC_DESC",
+        "POLICY_EXPIRY_DT",
+        "CLOSE_YR",
+        "CLOSE_QTR",
+        "AY_AGE",
+        "PY_AGE",
+        "Claimfeature",
+        "Region"
+    ]
+
+    partition_columns = [
+        "KeyPolClaimFeature_1",
+        "OGIS_MAJOR_LINE_CD",
+        "OGIS_MINOR_LINE_CD",
+        "OGIS_CLASS_PERIL_CD",
+        "CLAIM_NO",
+        "FEATURE_ID",
+        "ONECLAIM_CLAIM_NO",
+        "ONECLAIM_FEATURE_ID",
+        "POLICY_NO",
+        "POLICY_INCEPTION_DT",
+        "POLICY_YR",
+        "POLICY_QTR",
+        "LOSS_YR",
+        "LOSS_QTR",
+        "LOSS_REP_DT",
+        "LOSS_DT",
+        "ACCOUNT_LINE_DESC",
+        "TRANS_YR",
+        "TRANS_QTR",
+        "RISK_TYPE",
+        "SRC_SYS_NAME",
+        "PROD_REGION_1",
+        "ISSUING_COUNTRY",
+        "PRODUCT_LINE",
+        "SUB_PRODUCT_LINE",
+        "SEGMENT",
+        "CLM_INFO_01",
+        "MASTER_POLICY_NO",
+        "INSURED_NAME",
+        "PARTY_SIC_CD",
+        "PARTY_SIC_DESC",
+        "POLICY_EXPIRY_DT",
+        "CLOSE_YR",
+        "CLOSE_QTR",
+        "Claimfeature",
+        "Region"
+    ]
+
+    group_by_columns = [f"ref_{column}" for column in dimensional_columns]
+    partition_by_columns = [f"ref_{column}" for column in partition_columns]
+
+    # Prepare the reference DataFrame
+    ref_df = (
+        source_df.select(
+            *[col(column).alias(f"ref_{column}") for column in original_columns],
+             col("AY_AGE").alias("original_AY_AGE"),
+             col("PY_AGE").alias("original_PY_AGE")
+        )
+        .withColumn(
+            "MAX_MONTHS_VALUE_AY",
+            round(
+                months_between(lit(previous_quarter_date), concat(col("ref_LOSS_YR"), lit("-01-01"))),
+                0,
+            )
+        )
+        .withColumn(
+            "MAX_MONTHS_VALUE_PY",
+            round(
+                months_between(lit(previous_quarter_date), concat(col("ref_POLICY_YR"), lit("-01-01"))),
+                0,
+            )
+        )
+    )
+
+    def map_ay_age(ay_age, base_month):
+        return base_month + 12 * ((ay_age - 1) // 12)
+
+    map_ay_age_udf = udf(lambda ay_age: map_ay_age(ay_age, base_month), IntegerType())
+    ref_df = ref_df.withColumn("mapped_AY_AGE", map_ay_age_udf(col("ref_AY_AGE")))
+
+    def map_py_age(py_age, base_month):
+        return base_month + 12 * ((py_age - 1) // 12)
+
+    map_py_age_udf = udf(lambda py_age: map_py_age(py_age, base_month), IntegerType())
+    ref_df = ref_df.withColumn("mapped_PY_AGE", map_py_age_udf(col("ref_PY_AGE")))
+
+    res = (
+        ref_df.groupBy(
+            *partition_by_columns,
+             "mapped_AY_AGE",
+             "mapped_PY_AGE",
+             "original_PY_AGE",
+             "original_AY_AGE"
+        )
+        .agg(
+            sum("ref_GRS_PAY_USD").alias("GRS_PAY_USD"),
+            sum("ref_GRS_RES_USD").alias("GRS_RES_USD"),
+            sum("ref_GRS_INC_USD").alias("GRS_INC_USD")
+        )
+    )
+
+    res = res.withColumnRenamed("mapped_PY_AGE", "PY_AGE").withColumnRenamed("mapped_AY_AGE", "AY_AGE")
+
+    # Window specifications for AY_AGE and LOSS_YR
+    ay_loss_yr_window = (
+        Window.partitionBy("ref_LOSS_YR","ref_Region")
+        .orderBy("AY_AGE")
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+
+    # Window specifications for PY_AGE and POLICY_YR
+    py_policy_yr_window = (
+        Window.partitionBy("ref_POLICY_YR", "ref_Region")
+        .orderBy("PY_AGE")
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+
+    final_df = (
+        res.withColumn(
+            "GRS_PAY_USD_CUM_SUM_AY_AGE",
+            sum("GRS_PAY_USD").over(ay_loss_yr_window),
+        )
+        .withColumn(
+            "GRS_PAY_USD_CUM_SUM_PY_AGE",
+            sum("GRS_PAY_USD").over(py_policy_yr_window),
+        )
+        .withColumn(
+            "GRS_RES_USD_CUM_SUM_AY_AGE",
+            sum("GRS_RES_USD").over(ay_loss_yr_window),
+        )
+        .withColumn(
+            "GRS_RES_USD_CUM_SUM_PY_AGE",
+            sum("GRS_RES_USD").over(py_policy_yr_window),
+        )
+        .withColumn(
+            "GRS_INC_USD_CUM_SUM_AY_AGE",
+            sum("GRS_INC_USD").over(ay_loss_yr_window),
+        )
+        .withColumn(
+            "GRS_INC_USD_CUM_SUM_PY_AGE",
+            sum("GRS_INC_USD").over(py_policy_yr_window),
+        )
+        .withColumn(
+            "ITD_AS_OF_DATE", 
+            lit(current_date.strftime("%Y-%m-%d"))
+        )
+        .withColumn(
+            "ITD_AS_Quarter", 
+            lit(current_quarter)
+        )
+    )
+
+    partition_by_columns_without_ref = [
+        col(f"ref_{column}").alias(column) for column in partition_columns
+    ]
+
+    final_df= final_df.select(
+        *partition_by_columns_without_ref,
+        col("original_PY_AGE"),
+        col("original_AY_AGE"),
+        col("AY_AGE"),
+        col("PY_AGE"),
+        col("GRS_PAY_USD_CUM_SUM_AY_AGE"),
+        col("GRS_PAY_USD_CUM_SUM_PY_AGE"),
+        col("GRS_RES_USD_CUM_SUM_AY_AGE"),
+        col("GRS_RES_USD_CUM_SUM_PY_AGE"),
+        col("GRS_INC_USD_CUM_SUM_AY_AGE"),
+        col("GRS_INC_USD_CUM_SUM_PY_AGE"),
+        col("ITD_AS_OF_DATE"),
+        col("ITD_AS_Quarter")
+    )
+    claim_current.write_dataframe(final_df)  # noqa: F821
+    claim_prior.write_dataframe(final_df)
